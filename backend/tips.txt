@@ -1,0 +1,4 @@
+to activate the venv (do it insisde the backend folder)
+.\.venv\Scripts\Activate
+
+
