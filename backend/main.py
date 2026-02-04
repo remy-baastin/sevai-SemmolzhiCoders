@@ -1,105 +1,106 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import List, Optional
 from fastapi.middleware.cors import CORSMiddleware
-from app.services.rag_service import RAGService
-from app.services.digilocker_service import DigiLockerService
-from app.services.ocr_service import OCRService
-from app.models import ChatRequest, UserProfile
 import json
+
+# Services
+from app.services.rag_service import RAGService
+from app.services.data_service import DataService
+from app.services.rpa_service import RPAService
 
 app = FastAPI()
 
-# 1. Enable CORS (So Frontend can talk to Backend)
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-# 2. Initialize Services
-print("🚀 Starting Sev-ai Backend...")
+print("⚡ Initializing Services...")
+data_store = DataService()
 rag_engine = RAGService()
-digilocker = DigiLockerService()
-ocr_engine = OCRService()
+rpa_engine = RPAService()
 print("✅ Services Ready!")
 
-# --- ROOT ---
-@app.get("/")
-def read_root():
-    return {"message": "Sev-ai Backend is Running 🚀"}
+class UserProfile(BaseModel):
+    name: str
 
-# --- DIGILOCKER ROUTES ---
-@app.get("/api/auth/url")
-def get_auth_url():
-    return {"url": digilocker.get_auth_url()}
+class SchemeRequest(BaseModel):
+    user_profile: UserProfile
+    query: str
+    history: List[str] = []
 
-@app.post("/api/auth/token")
-def get_token(code: str):
-    return digilocker.get_access_token(code)
-
-@app.get("/api/user/profile")
-def get_user_profile(token: str):
-    return digilocker.get_user_details(token)
-
-@app.get("/api/user/files")
-def get_user_files(token: str):
-    return digilocker.get_issued_documents(token)
-
-# --- OCR ROUTE 1: AUTO-DETECT (The "Old Power") ---
-@app.post("/api/extract-from-doc")
-async def extract_from_doc(file: UploadFile = File(...)):
-    """
-    Standard Mode: Upload a file, and we guess if it's Aadhaar/Income/DL.
-    """
+@app.post("/api/chat")
+async def chat_endpoint(request: SchemeRequest):
     try:
-        contents = await file.read()
-        raw_text = ocr_engine.extract_text(contents)
-        parsed_data = ocr_engine.parse_document(raw_text)
-        return {"status": "success", "data": parsed_data}
+        # 1. Ask Brain
+        response_json_str = rag_engine.recommend_schemes(request.user_profile, request.query, request.history)
+        try:
+            ai_response = json.loads(response_json_str)
+        except:
+            return {"response_text": response_json_str, "action": "NONE"}
+
+        user_name = request.user_profile.name
+
+        # 2. Self-Healing (Update DB with new info)
+        extracted = ai_response.get("extracted_data")
+        if extracted and isinstance(extracted, dict):
+            print(f"📥 New Data Detected: {extracted}")
+            update_payload = {"standardized_data": extracted}
+            data_store.update_user_data(user_name, update_payload)
+
+        # 3. CHECK FOR ACTION
+        if ai_response.get("action") == "TRIGGER_RPA":
+            target_scheme = ai_response.get("target_scheme", "Unknown Scheme")
+            
+            # Fetch fresh data
+            full_user_data = data_store.get_user_data(user_name)
+            
+            # --- FIXED EXTRACTION LOGIC ---
+            profile_root = full_user_data.get("profile", {})
+            
+            # Check if names are nested inside 'personal_details' (Common in OCR data)
+            personal_info = profile_root.get("personal_details", profile_root)
+            
+            # Check if contact is nested inside 'contact_details'
+            contact_info = profile_root.get("contact_details", profile_root)
+
+            # Get Docs (for Marks)
+            docs = full_user_data.get("documents", [])
+            marks_data = {}
+            for doc in docs:
+                if doc.get("type") == "Marks Sheet":
+                    marks_data = doc.get("data", {})
+
+            # Construct Payload with CORRECT Paths
+            rpa_data = {
+                "personal_details": {
+                    "first_name": personal_info.get("first_name", ""),
+                    "middle_name": personal_info.get("middle_name", ""),
+                    "last_name": personal_info.get("last_name", ""), # Now correctly fetches "Rayappan"
+                    "dob": personal_info.get("dob", ""),
+                    "father_name": marks_data.get("Father Name") or personal_info.get("father_name", "")
+                },
+                "contact_details": {
+                    "mobile": contact_info.get("mobile", profile_root.get("mobile", "")),
+                    "email": contact_info.get("email", profile_root.get("email", ""))
+                },
+                "education_details": {
+                    "board": marks_data.get("Board", "State Board"),
+                    "marks": {"physics": marks_data.get("Physics"), "total": marks_data.get("Total")}
+                }
+            }
+            
+            print(f"🚀 Launching RPA for {target_scheme}...")
+            # Debug Print to confirm it worked
+            print(f"   Name extracted: {rpa_data['personal_details']['first_name']} {rpa_data['personal_details']['last_name']}")
+            
+            rpa_result = rpa_engine.apply_for_scheme(rpa_data, scheme_name=target_scheme)
+            
+            ai_response["response_text"] += f"\n\n🚀 [System]: Application process started! {rpa_result.get('message', '')}"
+            ai_response["rpa_status"] = rpa_result
+
+        return ai_response
+
     except Exception as e:
+        print(f"Chat Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-# --- OCR ROUTE 2: AGENT MODE (The "New Power") ---
-@app.post("/api/extract-custom")
-async def extract_custom_field(
-    file: UploadFile = File(...), 
-    target_label: str = Form(...) 
-):
-    """
-    Agent Mode: You tell us what to look for (e.g. 'Kisan ID').
-    """
-    try:
-        contents = await file.read()
-        raw_text = ocr_engine.extract_text(contents)
-        result = ocr_engine.extract_dynamic_field(raw_text, target_label)
-        return {
-            "status": "success", 
-            "search_result": result,
-            "raw_text_snippet": raw_text[:100] 
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# --- CHAT ROUTE (RAG) ---
-@app.post("/api/recommend")
-async def get_recommendations(request: ChatRequest):
-    """
-    The Brain Endpoint.
-    Input: JSON Profile + Query + History
-    Output: JSON Advice
-    """
-    try:
-        json_response_str = rag_engine.recommend_schemes(
-            request.user_profile, 
-            request.query, 
-            request.history
-        )
-        return json.loads(json_response_str)
-    except Exception as e:
-        return {
-            "eligible": False, 
-            "scheme_name": "Error", 
-            "reason": "AI Processing Failed",
-            "debug_error": str(e)
-        }

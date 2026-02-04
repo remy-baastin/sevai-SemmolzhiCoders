@@ -1,13 +1,7 @@
-# Python
+backend/chroma_db/
+backend/tips.txt
+.env
 __pycache__/
-*.py[cod]
-backend/.venv/
-backend/.env
-
-# Node / Frontend
-frontend/node_modules/
-frontend/dist/
-.DS_Store
-
-# IDE
-.vscode/
+*.pyc
+venv/
+.venv/

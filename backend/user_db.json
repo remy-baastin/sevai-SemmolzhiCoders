@@ -1,0 +1,100 @@
+{
+    "remy baastin rayappan": {
+        "profile": {
+            "document_type": "Marks Statement cum Certificate",
+            "id_number": "20670312",
+            "personal_details": {
+                "full_name": "Remy Baastin Rayappan",
+                "first_name": "Remy",
+                "middle_name": "Baastin",
+                "last_name": "Rayappan",
+                "gender": "Male",
+                "dob": "31/07/2005"
+            },
+            "relations": {
+                "parent_name": "Bennett Rayappan",
+                "relation_type": "Father"
+            },
+            "contact_details": {
+                "mobile": "9751604273"
+            },
+            "address_details": {
+                "full_address": "1/5,GA Canal (East Bank) M.Chavady Thanjavur Thanjavur,Thanjavur,Tamil Nadu - 613001",
+                "pincode": "613001",
+                "state": "Tamil Nadu",
+                "district": "Thanjavur"
+            },
+            "full_name": "Remy Baastin Rayappan",
+            "father_name": "Bennett Rayappan",
+            "mother_name": "Jancy Sickory Daisy S",
+            "email": "remy03828@gmail.com"
+        },
+        "documents": [
+            {
+                "type": "Class XII Marks Statement Cum Certificate",
+                "data": {
+                    "school_name": "Thamarai Int. School, Karunthattankudi, Thanjavur, TN",
+                    "board_name": "Central Board of Secondary Education",
+                    "year": "2022",
+                    "subjects": [
+                        "English Core",
+                        "Mathematics",
+                        "Physics",
+                        "Chemistry",
+                        "Biology",
+                        "Work Experience",
+                        "Health & Physical Education",
+                        "General Studies"
+                    ],
+                    "result": "PASS",
+                    "marks": [
+                        {
+                            "subject": "English Core",
+                            "marks_obtained": "093",
+                            "grade": "A1"
+                        },
+                        {
+                            "subject": "Mathematics",
+                            "marks_obtained": "072",
+                            "grade": "B1"
+                        },
+                        {
+                            "subject": "Physics",
+                            "marks_obtained": "082",
+                            "grade": "A2"
+                        },
+                        {
+                            "subject": "Chemistry",
+                            "marks_obtained": "084",
+                            "grade": "B1"
+                        },
+                        {
+                            "subject": "Biology",
+                            "marks_obtained": "073",
+                            "grade": "C1"
+                        },
+                        {
+                            "subject": "Work Experience",
+                            "marks_obtained": null,
+                            "grade": "A1"
+                        },
+                        {
+                            "subject": "Health & Physical Education",
+                            "marks_obtained": null,
+                            "grade": "A2"
+                        },
+                        {
+                            "subject": "General Studies",
+                            "marks_obtained": null,
+                            "grade": "A1"
+                        }
+                    ]
+                }
+            },
+            {
+                "type": "Unknown",
+                "data": {}
+            }
+        ]
+    }
+}

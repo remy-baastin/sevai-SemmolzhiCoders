@@ -1,101 +1,122 @@
-from langchain_chroma import Chroma
-from langchain_groq import ChatGroq
-from app.services.vector_store import SchemeDatabase
 import os
 import json
 from dotenv import load_dotenv
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_core.prompts import PromptTemplate
+from app.services.data_service import DataService
+from langchain_groq import ChatGroq
 
 class RAGService:
     def __init__(self):
         load_dotenv()
-        
-        # 1. Initialize Groq (The Brain)
         api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
-            print("❌ ERROR: GROQ_API_KEY not found in .env file.")
+            print("❌ CRITICAL: GROQ_API_KEY is missing!")
+
+        self.embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        self.db_path = "chroma_db"
         
-        # Initialize Llama 3 via Groq
+        if os.path.exists(self.db_path):
+            try:
+                self.vector_store = Chroma(
+                    persist_directory=self.db_path, 
+                    embedding_function=self.embeddings
+                )
+            except:
+                 self.vector_store = None
+        else:
+            self.vector_store = None
+
         self.llm = ChatGroq(
-            temperature=0, 
+            temperature=0,
             model_name="llama-3.3-70b-versatile",
-            api_key=api_key
+            groq_api_key=api_key
         )
-        
-        # 2. Initialize Database (The Memory)
-        self.db = SchemeDatabase()
+        self.data_store = DataService()
 
-    def recommend_schemes(self, user: 'UserProfile', user_query: str, history: list = []):
-        
-        # --- STEP 1: Format Chat History ---
-        chat_history_text = ""
-        if history:
-            chat_history_text = "PREVIOUS CONVERSATION:\n"
-            for turn in history[-3:]: # Keep last 3 turns
-                chat_history_text += f"User: {turn.get('user', '')}\nAI: {turn.get('ai', '')}\n"
+    def recommend_schemes(self, simple_profile, user_query, history):
+        try:
+            user_name = getattr(simple_profile, 'name', str(simple_profile)) 
+        except:
+            user_name = "Unknown"
 
-        # --- STEP 2: Format OCR Proofs ---
-        # If OCR found Verified Documents, we list them here so the AI trusts them.
-        doc_proofs = ""
-        if hasattr(user, 'verified_documents') and user.verified_documents:
-            doc_proofs = "\nVERIFIED DOCUMENTS (OCR SCANNED):"
-            for doc, val in user.verified_documents.items():
-                doc_proofs += f"\n- {doc}: {val} (Verified)"
+        # 1. Fetch User Data
+        rich_user_data = self.data_store.get_user_data(user_name)
+        context_str = json.dumps(rich_user_data, indent=2)
 
-        # --- STEP 3: Search Database ---
-        # Search using natural language profile + query
-        search_context = user.to_search_context()
-        full_query = f"{user_query} {search_context}"
-        
-        print(f"🔍 Searching DB for: {user_query}...")
-        relevant_schemes = self.db.search_schemes(full_query, k=4)
-        schemes_text = "\n\n".join([doc.page_content for doc in relevant_schemes])
-        
-        # --- STEP 4: The Master Prompt ---
-        prompt = f"""
-        You are Sev-ai, an intelligent Government Scheme Advisor.
-        
-        {chat_history_text}
+        # 2. RAG Search
+        if self.vector_store:
+            try:
+                docs = self.vector_store.similarity_search(user_query, k=4) 
+                scheme_context = "\n".join([d.page_content for d in docs])
+            except:
+                scheme_context = "Database search failed."
+        else:
+            scheme_context = "No specific scheme database found."
 
-        USER PROFILE:
-        - Age: {user.age} | Gender: {user.gender}
-        - Caste: {user.caste} | Income: ₹{user.income}
-        - Occupation: {user.occupation}
-        - State: {user.state}
-        {doc_proofs}
+        # --- THE FIX: CONFIRMATION LOGIC ADDED ---
+        template = """
+        You are Sev-ai, an intelligent government scheme assistant.
         
-        AVAILABLE SCHEMES (From Database):
-        {schemes_text}
+        --- USER CONTEXT (DATABASE) ---
+        {user_data}
         
-        USER QUERY: "{user_query}"
+        --- SKILLS ---
+        1. **PAN Card** (Target: "PAN Card") - Requires: Name, DOB, Mobile, Email.
         
-        INSTRUCTIONS:
-        1. Check eligibility STRICTLY against the User Profile.
-        2. If the user has a Verified Document (like Roll No or Kisan ID), USE IT to confirm eligibility.
-        3. If a scheme requires a document they haven't uploaded, list it in "missing_documents".
-        4. Output valid JSON only.
+        --- HISTORY ---
+        {history}
 
-        FORMAT:
+        --- CURRENT USER MESSAGE ---
+        {query}
+        
+        --- INSTRUCTIONS ---
+        1. **Check Data Status:** Look at the "USER CONTEXT". Do we have Name, DOB, Mobile, and Email?
+        2. **Analyze User Intent:**
+           - **New Data:** If user provides missing info (e.g., "Email is..."), extract it.
+           - **Confirmation:** If user says "Yes", "Correct", "Proceed", or "Apply" AND we have all required data (Name, DOB, Mobile, Email), then **TRIGGER RPA**.
+           - **Request:** If user asks for PAN but data is missing, ask for the specific missing field.
+        
+        3. **Decision Logic (PAN Card):**
+           - IF (Intent is Apply OR Confirmation) AND (All Data Present) -> ACTION: "TRIGGER_RPA".
+           - IF (Intent is Apply) AND (Data Missing) -> Ask user for missing data.
+           - IF (User provided Data) -> Extract it, and if profile is now complete, ACTION: "TRIGGER_RPA".
+
+        --- OUTPUT FORMAT (STRICT JSON) ---
         {{
-            "eligible": true/false,
-            "scheme_name": "Best Matching Scheme Name",
-            "reason": "Clear explanation based on profile and docs.",
-            "benefits": "Short summary of benefits.",
-            "missing_documents": ["Doc 1", "Doc 2"]
+            "response_text": "Friendly response...",
+            "extracted_data": {{ "email": "...", "mobile": "..." }} (or null),
+            "action": "TRIGGER_RPA" or "NONE",
+            "target_scheme": "PAN Card" (or null),
+            "missing_data": []
         }}
         """
 
-        # --- STEP 5: Run Inference ---
-        print("🧠 Brain is thinking...")
+        prompt = PromptTemplate(
+            input_variables=["user_data", "scheme_info", "query", "history"],
+            template=template
+        )
+
+        chain = prompt | self.llm
         try:
-            response = self.llm.invoke(prompt)
-            # Clean up the response (remove ```json wrappers if model adds them)
-            clean_content = response.content.replace("```json", "").replace("```", "").strip()
-            return clean_content
-        except Exception as e:
-            print(f"❌ AI Error: {e}")
-            return json.dumps({
-                "eligible": False, 
-                "scheme_name": "Error", 
-                "reason": "AI Brain Connection Failed", 
-                "benefits": "N/A"
+            # JOIN HISTORY INTO A STRING
+            history_str = "\n".join(history) if history else "No previous chat."
+
+            response = chain.invoke({
+                "user_data": context_str, 
+                "scheme_info": scheme_context,
+                "query": user_query,
+                "history": history_str  # <--- PASS HISTORY SO IT REMEMBERS THE QUESTION
             })
+            
+            content = response.content
+            json_start = content.find('{')
+            json_end = content.rfind('}') + 1
+            if json_start != -1 and json_end != -1:
+                return content[json_start:json_end]
+            return content
+
+        except Exception as e:
+            print(f"❌ Chatbot Error: {e}")
+            return json.dumps({"response_text": "Error.", "action": "NONE"})
