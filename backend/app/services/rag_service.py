@@ -1,155 +1,101 @@
-'''
-from app.services.vector_store import SchemeDatabase
-from langchain_community.llms import Ollama
-import json
-
-class RAGService:
-    def __init__(self):
-        # Connect to your GPU-powered Scheme Database
-        self.db = SchemeDatabase()
-        
-        # Connect to your local Llama 3 model
-        # temperature=0 makes the bot strict and factual (good for government rules)
-        print("🤖 Initializing Llama 3 Brain...")
-        self.llm = Ollama(model="llama3", temperature=0)
-
-    def recommend_schemes(self, user_xml_data: str, user_query: str):
-        """
-        The Core Logic:
-        1. Reads User Data (XML)
-        2. Finds relevant schemes (Vector Search)
-        3. Asks Llama 3 to check eligibility
-        """
-        
-        # Step 1: Search for relevant schemes
-        # We combine the query with a bit of user context to improve search
-        search_query = f"{user_query} {user_xml_data[:200]}" # Use first 200 chars of profile for context
-        print(f"🔍 Searching database for: {user_query}...")
-        
-        relevant_schemes = self.db.search_schemes(search_query, k=4)
-        
-        # Prepare the "Context" text for the AI
-        schemes_context = "\n\n".join([doc.page_content for doc in relevant_schemes])
-        
-        # Step 2: Construct the "Judge" Prompt
-        prompt = f"""
-        You are an expert Government Scheme Advisor for India.
-        
-        USER PROFILE (Verified Data):
-        {user_xml_data}
-        
-        AVAILABLE SCHEMES (Reference Data):
-        {schemes_context}
-        
-        USER QUESTION: 
-        "{user_query}"
-        
-        INSTRUCTIONS:
-        1. Analyze the User Profile against the Eligibility Rules of the schemes provided above.
-        2. STRICTLY check if the user meets criteria like Age, Income, Caste, or Gender.
-        3. If they are eligible, explain WHY and list the BENEFITS.
-        4. If they are NOT eligible, explain exactly what is missing (e.g., "Income too high").
-        5. List the required documents from the scheme details.
-
-        FORMAT YOUR RESPONSE AS JSON:
-        {{
-            "eligible": true/false,
-            "scheme_name": "Name of best match",
-            "reason": "Clear explanation of eligibility",
-            "benefits": "What they get",
-            "missing_documents": ["Doc 1", "Doc 2"]
-        }}
-        """
-
-        # Step 3: Generate Answer
-        print("🧠 Llama 3 is thinking...")
-        response = self.llm.invoke(prompt)
-        return response
-        
-        '''
-
-from app.services.vector_store import SchemeDatabase
+from langchain_chroma import Chroma
 from langchain_groq import ChatGroq
+from app.services.vector_store import SchemeDatabase
 import os
+import json
 from dotenv import load_dotenv
 
 class RAGService:
     def __init__(self):
-        # 1. Load Environment Variables
-        from dotenv import load_dotenv
-        load_dotenv() # This looks for a .env file
+        load_dotenv()
         
-        # 2. Connect to Database
+        # 1. Initialize Groq (The Brain)
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            print("❌ ERROR: GROQ_API_KEY not found in .env file.")
+        
+        # Initialize Llama 3 via Groq
+        self.llm = ChatGroq(
+            temperature=0, 
+            model_name="llama-3.3-70b-versatile",
+            api_key=api_key
+        )
+        
+        # 2. Initialize Database (The Memory)
         self.db = SchemeDatabase()
-        
-        # 3. Get Key & DEBUG PRINT
-        groq_api_key = os.getenv("GROQ_API_KEY")
-        
-        # --- DEBUG CHECK ---
-        if not groq_api_key:
-            print("❌ FATAL ERROR: Could not find GROQ_API_KEY in .env file!")
-            print("   -> Make sure the file is named exactly '.env' (not .env.txt)")
-            print("   -> Make sure it is inside the 'backend' folder.")
-            return # Stop here
-        else:
-            print(f"✅ Success! Found API Key: {groq_api_key[:5]}******")
-        # -------------------
 
-        print("☁️  Connecting to Groq Cloud (Llama 3.3)...")
-        try:
-            self.llm = ChatGroq(
-                temperature=0, 
-                model_name="llama-3.3-70b-versatile",
-                api_key=groq_api_key
-            )
-        except Exception as e:
-            print(f"❌ Groq Connection Error: {e}")
+    def recommend_schemes(self, user: 'UserProfile', user_query: str, history: list = []):
+        
+        # --- STEP 1: Format Chat History ---
+        chat_history_text = ""
+        if history:
+            chat_history_text = "PREVIOUS CONVERSATION:\n"
+            for turn in history[-3:]: # Keep last 3 turns
+                chat_history_text += f"User: {turn.get('user', '')}\nAI: {turn.get('ai', '')}\n"
 
-    def recommend_schemes(self, user_xml_data: str, user_query: str):
-        # Step 1: Search Database
-        search_query = f"{user_query} {user_xml_data[:200]}"
-        print(f"🔍 Searching database for: {user_query}...")
+        # --- STEP 2: Format OCR Proofs ---
+        # If OCR found Verified Documents, we list them here so the AI trusts them.
+        doc_proofs = ""
+        if hasattr(user, 'verified_documents') and user.verified_documents:
+            doc_proofs = "\nVERIFIED DOCUMENTS (OCR SCANNED):"
+            for doc, val in user.verified_documents.items():
+                doc_proofs += f"\n- {doc}: {val} (Verified)"
+
+        # --- STEP 3: Search Database ---
+        # Search using natural language profile + query
+        search_context = user.to_search_context()
+        full_query = f"{user_query} {search_context}"
         
-        relevant_schemes = self.db.search_schemes(search_query, k=4)
-        schemes_context = "\n\n".join([doc.page_content for doc in relevant_schemes])
+        print(f"🔍 Searching DB for: {user_query}...")
+        relevant_schemes = self.db.search_schemes(full_query, k=4)
+        schemes_text = "\n\n".join([doc.page_content for doc in relevant_schemes])
         
-        # Step 2: Construct Prompt
+        # --- STEP 4: The Master Prompt ---
         prompt = f"""
-        You are an expert Government Scheme Advisor for India.
+        You are Sev-ai, an intelligent Government Scheme Advisor.
         
-        USER PROFILE (Verified Data):
-        {user_xml_data}
+        {chat_history_text}
+
+        USER PROFILE:
+        - Age: {user.age} | Gender: {user.gender}
+        - Caste: {user.caste} | Income: ₹{user.income}
+        - Occupation: {user.occupation}
+        - State: {user.state}
+        {doc_proofs}
         
-        AVAILABLE SCHEMES (Context):
-        {schemes_context}
+        AVAILABLE SCHEMES (From Database):
+        {schemes_text}
         
-        USER QUESTION: "{user_query}"
+        USER QUERY: "{user_query}"
         
         INSTRUCTIONS:
-        1. Analyze the User Profile against the Eligibility Rules of the schemes.
-        2. STRICTLY check criteria like Age, Income, Caste, or Gender.
-        3. If eligible, explain WHY and list BENEFITS.
-        4. If NOT eligible, explain exactly what is missing.
+        1. Check eligibility STRICTLY against the User Profile.
+        2. If the user has a Verified Document (like Roll No or Kisan ID), USE IT to confirm eligibility.
+        3. If a scheme requires a document they haven't uploaded, list it in "missing_documents".
+        4. Output valid JSON only.
 
-        FORMAT YOUR RESPONSE AS JSON ONLY:
+        FORMAT:
         {{
             "eligible": true/false,
-            "scheme_name": "Name of best match",
-            "reason": "Clear explanation",
-            "benefits": "Summary of benefits",
+            "scheme_name": "Best Matching Scheme Name",
+            "reason": "Clear explanation based on profile and docs.",
+            "benefits": "Short summary of benefits.",
             "missing_documents": ["Doc 1", "Doc 2"]
         }}
         """
 
-        # Step 3: Get Answer
-        print("🧠 Cloud Brain is thinking...")
+        # --- STEP 5: Run Inference ---
+        print("🧠 Brain is thinking...")
         try:
             response = self.llm.invoke(prompt)
-            content = response.content
-            
-            # 🧹 CLEANUP: Remove the ```json and ``` marks
-            clean_content = content.replace("```json", "").replace("```", "").strip()
+            # Clean up the response (remove ```json wrappers if model adds them)
+            clean_content = response.content.replace("```json", "").replace("```", "").strip()
             return clean_content
-            
         except Exception as e:
-            return f'{{"error": "Error connecting to Brain: {e}"}}'
+            print(f"❌ AI Error: {e}")
+            return json.dumps({
+                "eligible": False, 
+                "scheme_name": "Error", 
+                "reason": "AI Brain Connection Failed", 
+                "benefits": "N/A"
+            })
